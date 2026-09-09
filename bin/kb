@@ -1,0 +1,268 @@
+#!/usr/bin/env python3
+"""kb — query the Spero research notes.
+
+Standard library only. The corpus under kb/notes/ is plain markdown, one file
+per company/market/idea, each holding a reverse-chronological log of dated
+entries (articles, Granola pulls, distilled conversations). No database, no
+API keys, no network — just text on disk.
+
+  kb list                       every entity, with type and entry count
+  kb search <terms...>          keyword search across all notes
+  kb show <name>                one entity's full note, newest entry first
+  kb stats                      coverage — entity counts, stubs, staleness
+"""
+
+from __future__ import annotations
+
+import argparse
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+NOTES = ROOT / "kb" / "notes"
+
+ENTRY_HEADING_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s+\[(\w+)\]\s*(.*)$")
+
+
+# --------------------------------------------------------------------------- #
+# frontmatter
+# --------------------------------------------------------------------------- #
+
+def parse_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a '---' delimited YAML-ish header from the body.
+
+    Handles only what notes use: `key: value` scalars, `[a, b]` inline lists,
+    and blocks of `  - item` strings. Anything more exotic means the writer
+    and this reader have drifted apart.
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    header, body = text[3:end], text[end + 4 :]
+
+    meta: dict = {}
+    current_list_key: str | None = None
+    for line in header.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        item = re.match(r"\s+-\s+(.*)$", line)
+        if item and current_list_key:
+            meta[current_list_key].append(item.group(1).strip().strip("\"'"))
+            continue
+        kv = re.match(r"([A-Za-z0-9_]+):\s*(.*)$", line)
+        if not kv:
+            continue
+        key, value = kv.group(1), kv.group(2).strip()
+        if value == "":
+            meta[key] = []
+            current_list_key = key
+        else:
+            current_list_key = None
+            if value.startswith("[") and value.endswith("]"):
+                inner = value[1:-1].strip()
+                meta[key] = [v.strip().strip("\"'") for v in inner.split(",") if v.strip()]
+            else:
+                meta[key] = value.strip("\"'")
+    return meta, body
+
+
+def entries_in(body: str) -> list[tuple[str, str, str]]:
+    """(date, entry_type, title) for every '## YYYY-MM-DD [type] Title' heading."""
+    return [
+        (m.group(1), m.group(2), m.group(3).strip())
+        for line in body.splitlines()
+        if (m := ENTRY_HEADING_RE.match(line))
+    ]
+
+
+def load_entities() -> list[dict]:
+    out = []
+    if not NOTES.is_dir():
+        return out
+    for path in sorted(NOTES.glob("*.md")):
+        text = path.read_text(encoding="utf-8")
+        meta, body = parse_frontmatter(text)
+        meta.setdefault("name", path.stem)
+        meta.setdefault("type", "unknown")
+        out.append({"meta": meta, "body": body, "path": path, "entries": entries_in(body)})
+    return out
+
+
+def resolve(name: str, entities: list[dict]) -> dict | None:
+    """Find one entity by exact name, an alias, or an unambiguous substring."""
+    needle = name.strip().lower()
+    for e in entities:
+        if e["meta"].get("name", "").lower() == needle:
+            return e
+    for e in entities:
+        aliases = e["meta"].get("aliases") or []
+        if any(a.lower() == needle for a in aliases):
+            return e
+    hits = [
+        e
+        for e in entities
+        if needle in e["meta"].get("name", "").lower()
+        or any(needle in a.lower() for a in (e["meta"].get("aliases") or []))
+    ]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        names = ", ".join(h["meta"].get("name", "?") for h in hits)
+        print(f"'{name}' is ambiguous — matches: {names}", file=sys.stderr)
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# commands
+# --------------------------------------------------------------------------- #
+
+def cmd_list(args) -> int:
+    entities = load_entities()
+    if not entities:
+        print("No notes yet. Expected files in kb/notes/*.md")
+        return 1
+    rows = [
+        (
+            e["meta"].get("name", "?"),
+            e["meta"].get("type", "?"),
+            str(len(e["entries"])),
+            max((d for d, _, _ in e["entries"]), default="—"),
+        )
+        for e in entities
+    ]
+    rows.sort(key=lambda r: (r[1], r[0].lower()))
+    headers = ("NAME", "TYPE", "ENTRIES", "LATEST")
+    widths = [
+        max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
+        for i in range(len(headers))
+    ]
+    print("  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)))
+    print("  ".join("-" * w for w in widths))
+    for r in rows:
+        print("  ".join(r[i].ljust(widths[i]) for i in range(len(r))))
+    print(f"\n{len(rows)} entities")
+    return 0
+
+
+def cmd_search(args) -> int:
+    terms = [t.lower() for t in args.terms]
+    if not terms:
+        print("give me something to search for", file=sys.stderr)
+        return 2
+
+    entities = load_entities()
+    if args.type:
+        entities = [e for e in entities if e["meta"].get("type") == args.type]
+
+    results = []
+    for e in entities:
+        text = e["path"].read_text(encoding="utf-8")
+        low = text.lower()
+        if not all(t in low for t in terms):
+            continue
+        hits = []
+        for num, raw_line in enumerate(text.splitlines(), 1):
+            ll = raw_line.lower()
+            if any(t in ll for t in terms):
+                stripped = raw_line.strip()
+                if stripped and not stripped.startswith("---"):
+                    hits.append((num, stripped))
+        score = sum(low.count(t) for t in terms)
+        results.append((score, e["meta"].get("name", e["path"].stem), e["path"], hits))
+
+    if not results:
+        print("no matches")
+        return 1
+
+    results.sort(key=lambda r: -r[0])
+    for score, label, path, hits in results:
+        rel = path.relative_to(ROOT)
+        print(f"\n\033[1m{label}\033[0m  ({score} hits)  {rel}")
+        for num, line in hits[: args.context]:
+            if len(line) > 300:
+                line = line[:300] + "…"
+            print(f"  {num:>5}: {line}")
+        if len(hits) > args.context:
+            print(f"        … {len(hits) - args.context} more lines")
+    print(f"\n{len(results)} entities matched")
+    return 0
+
+
+def cmd_show(args) -> int:
+    entities = load_entities()
+    e = resolve(args.name, entities)
+    if not e:
+        print(f"no entity matching '{args.name}' — try: kb list", file=sys.stderr)
+        return 1
+    meta = e["meta"]
+    print(f"\033[1m{meta.get('name')}\033[0m  ({meta.get('type', '?')})")
+    aliases = meta.get("aliases")
+    if aliases:
+        print(f"  aliases: {', '.join(aliases)}")
+    print(f"  entries: {len(e['entries'])}")
+    print()
+    print(e["body"].strip())
+    return 0
+
+
+def cmd_stats(args) -> int:
+    entities = load_entities()
+    if not entities:
+        print("No notes yet. Expected files in kb/notes/*.md")
+        return 1
+
+    by_type: dict[str, int] = {}
+    for e in entities:
+        t = e["meta"].get("type", "unknown")
+        by_type[t] = by_type.get(t, 0) + 1
+    print("entities by type:")
+    for t, n in sorted(by_type.items(), key=lambda kv: -kv[1]):
+        print(f"  {t}: {n}")
+
+    stubs = [e["meta"].get("name", "?") for e in entities if not e["entries"]]
+    if stubs:
+        print(f"\nstubs (no entries yet, {len(stubs)}): {', '.join(sorted(stubs))}")
+
+    all_dates = sorted(d for e in entities for d, _, _ in e["entries"])
+    if all_dates:
+        print(f"\nentries span {all_dates[0]} to {all_dates[-1]}")
+
+    entry_types: dict[str, int] = {}
+    for e in entities:
+        for _, et, _ in e["entries"]:
+            entry_types[et] = entry_types.get(et, 0) + 1
+    if entry_types:
+        print("\nentries by source type:")
+        for et, n in sorted(entry_types.items(), key=lambda kv: -kv[1]):
+            print(f"  {et}: {n}")
+    return 0
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="kb", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="every entity in the KB").set_defaults(func=cmd_list)
+
+    s = sub.add_parser("search", help="keyword search across all notes")
+    s.add_argument("terms", nargs="+")
+    s.add_argument("--type", choices=["company", "market", "idea"], help="restrict to one type")
+    s.add_argument("--context", type=int, default=6, help="matching lines to show per note")
+    s.set_defaults(func=cmd_search)
+
+    b = sub.add_parser("show", help="one entity's full note")
+    b.add_argument("name")
+    b.set_defaults(func=cmd_show)
+
+    sub.add_parser("stats", help="corpus coverage").set_defaults(func=cmd_stats)
+
+    args = p.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
