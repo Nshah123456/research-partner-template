@@ -7,6 +7,7 @@ entries (articles, Granola pulls, distilled conversations). No database, no
 API keys, no network — just text on disk.
 
   kb list                       every entity, with type and entry count
+  kb list --watched             only entities flagged watch: true
   kb search <terms...>          keyword search across all notes
   kb show <name>                one entity's full note, newest entry first
   kb stats                      coverage — entity counts, stubs, staleness
@@ -21,6 +22,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 NOTES = ROOT / "kb" / "notes"
+
+WATCH_SOFT_LIMIT = 5  # more than this and the proactive-watch routine gets shallow/noisy — see CLAUDE.md
 
 ENTRY_HEADING_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s+\[(\w+)\]\s*(.*)$")
 
@@ -91,6 +94,10 @@ def load_entities() -> list[dict]:
     return out
 
 
+def is_watched(meta: dict) -> bool:
+    return str(meta.get("watch", "")).strip().lower() == "true"
+
+
 def resolve(name: str, entities: list[dict]) -> dict | None:
     """Find one entity by exact name, an alias, or an unambiguous substring."""
     needle = name.strip().lower()
@@ -124,17 +131,30 @@ def cmd_list(args) -> int:
     if not entities:
         print("No notes yet. Expected files in kb/notes/*.md")
         return 1
+    if args.watched:
+        entities = [e for e in entities if is_watched(e["meta"])]
+        if not entities:
+            print("no entities are flagged watch: true")
+            return 1
+        if len(entities) > WATCH_SOFT_LIMIT:
+            print(
+                f"note: {len(entities)} entities are watched — more than "
+                f"{WATCH_SOFT_LIMIT} tends to make each proactive-watch run "
+                "shallower and noisier. Consider unwatching some.\n",
+                file=sys.stderr,
+            )
     rows = [
         (
             e["meta"].get("name", "?"),
             e["meta"].get("type", "?"),
             str(len(e["entries"])),
             max((d for d, _, _ in e["entries"]), default="—"),
+            "watch" if is_watched(e["meta"]) else "",
         )
         for e in entities
     ]
     rows.sort(key=lambda r: (r[1], r[0].lower()))
-    headers = ("NAME", "TYPE", "ENTRIES", "LATEST")
+    headers = ("NAME", "TYPE", "ENTRIES", "LATEST", "WATCH")
     widths = [
         max(len(headers[i]), max((len(r[i]) for r in rows), default=0))
         for i in range(len(headers))
@@ -226,6 +246,15 @@ def cmd_stats(args) -> int:
     if stubs:
         print(f"\nstubs (no entries yet, {len(stubs)}): {', '.join(sorted(stubs))}")
 
+    watched = [e["meta"].get("name", "?") for e in entities if is_watched(e["meta"])]
+    if watched:
+        print(f"\nwatched ({len(watched)}): {', '.join(sorted(watched))}")
+        if len(watched) > WATCH_SOFT_LIMIT:
+            print(
+                f"  note: more than {WATCH_SOFT_LIMIT} watched tends to make "
+                "each proactive-watch run shallower and noisier — consider unwatching some."
+            )
+
     all_dates = sorted(d for e in entities for d, _, _ in e["entries"])
     if all_dates:
         print(f"\nentries span {all_dates[0]} to {all_dates[-1]}")
@@ -246,7 +275,9 @@ def main() -> int:
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("list", help="every entity in the KB").set_defaults(func=cmd_list)
+    l = sub.add_parser("list", help="every entity in the KB")
+    l.add_argument("--watched", action="store_true", help="only entities flagged watch: true")
+    l.set_defaults(func=cmd_list)
 
     s = sub.add_parser("search", help="keyword search across all notes")
     s.add_argument("terms", nargs="+")

@@ -50,7 +50,9 @@ Rules for this shape:
 
 - **Frontmatter:** `name` (required), `type` (`company` | `market` | `idea`),
   `aliases` (optional inline list — other names/spellings this entity gets
-  referred to by, so lookups and mention-matching don't miss it).
+  referred to by, so lookups and mention-matching don't miss it), `watch`
+  (optional boolean, `true`/`false` — marks an entity for the proactive
+  research routine described below; absent means not watched).
 - **The filename must exactly match `name`** — spaces, `+`, whatever's
   actually in the name — not a slugified version. Obsidian resolves
   `[[wikilinks]]` by filename, not by the `name` field, so a mismatch (e.g.
@@ -61,8 +63,10 @@ Rules for this shape:
 - **Entries are reverse-chronological** (newest at the top) — re-opening a
   file should surface current thinking first, not the oldest context.
 - **Every entry heading is exactly** `## YYYY-MM-DD [type] Title` where type
-  is `article`, `granola`, or `conversation`. This is what `bin/kb` parses to
-  count entries and find the latest date — don't drift from it.
+  is `article`, `granola`, `conversation`, or `watch` (the last one is written
+  only by the automated proactive-watch routine described below, never by
+  Claude in a live conversation). This is what `bin/kb` parses to count
+  entries and find the latest date — don't drift from it.
 - **Cross-link with `[[Entity Name]]`** wherever an entry mentions another
   company/market/idea. This is Obsidian's wikilink syntax — plain text
   without Obsidian installed, a clickable graph edge with it.
@@ -114,6 +118,41 @@ confirm, and confirm which entity it belongs to if that's not obvious. This
 only works inside a Claude Code session with this repo in reach; there's no
 ambient capture of conversations happening anywhere else.
 
+**Proactive watch (scheduled, every couple of days).** A local scheduled
+task — not a cloud routine, since it needs direct access to this KB on
+disk — runs periodically and does fresh research (web search) on every
+entity in `kb/notes/` whose frontmatter has `watch: true`. This is the one
+exception to "conversations only get captured after you confirm": it runs
+unattended, on its own schedule, without you in the loop turn-by-turn.
+**This isn't created automatically just by cloning this repo** — ask your
+Claude Code session to set it up (see README.md).
+
+- **Only entities you (or Claude, with your sign-off) explicitly mark
+  `watch: true`** get this treatment — never inferred from how much
+  attention a topic happens to be getting. Claude can propose adding the
+  flag to a note the same way it proposes new frontmatter fields generally
+  (say why, wait for a yes), but never sets it silently.
+- **No hard limit on how many entities can be watched, but keep it to
+  ~3-5 at a time.** Every run does fresh research on *every* watched entity
+  in one unattended pass — more topics means shallower coverage per topic
+  and more chances of a marginal finding triggering a notification. `bin/kb
+  stats` / `bin/kb list --watched` print a soft warning past 5.
+- Each run: for every watched entity, search for genuinely new developments
+  since the last run (new companies in the space, new funding, new articles/
+  analysis) — not a re-summary of what's already in the note.
+- **Findings reach you as a push notification**, not a silent KB write —
+  that's the whole point of asking for it, so you don't have to remember to
+  go check. The note itself can still get a new stub/article entry so the
+  finding has a permanent home, but the notification is the primary delivery
+  mechanism, not the write.
+- Runs only while your machine and Claude Code are available (it's a local
+  scheduled task, not a 24/7 cloud routine) — a missed cycle just means the
+  next one covers a longer window.
+- New findings get written as a `[watch]` entry (see above) — source(s) it
+  found, a distillation, no fabricated "your take" since you weren't in the
+  loop for this one. File edits are left uncommitted for you to review
+  (`git diff`/`git status`) — the routine doesn't commit on its own behalf.
+
 ## Rules for anyone (human or agent) extending this
 
 1. **Never guess a value.** If your reasoning or the source material doesn't
@@ -127,6 +166,7 @@ ambient capture of conversations happening anywhere else.
 
 ```bash
 bin/kb list                       # every entity, type, entry count, latest date
+bin/kb list --watched              # only entities flagged watch: true
 bin/kb search moat "heat pump"    # keyword search across all notes
 bin/kb search --type market defensibility   # restrict to one type
 bin/kb show Airform                # one entity's full note

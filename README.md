@@ -15,6 +15,16 @@ frontmatter schema is meant to evolve.
 3. Optional: open this folder as an Obsidian vault to see the `[[wikilinks]]`
    between entities as a live graph. Nothing here depends on Obsidian —
    it's just plain markdown either way.
+4. Optional — proactive research: flag an entity `watch: true` in its
+   frontmatter, then ask your Claude Code session to set up a local
+   recurring scheduled task (every couple of days is a reasonable default)
+   that checks watched entities for genuinely new developments and pushes
+   you a notification when it finds something. This has to be created
+   per-machine/per-person — it doesn't come with the repo, since it's tied
+   to your own Claude Code install, not to these files. See CLAUDE.md's
+   "Proactive watch" section for exactly how it's meant to behave once set
+   up. Keep the watch list small (~3-5) — `bin/kb stats` will nudge you if
+   it grows past that.
 
 ## Quick start
 
