@@ -34,6 +34,7 @@ bin/kb search moat "heat pump"    # keyword search across all notes
 bin/kb search --type market defensibility   # restrict to one type
 bin/kb show Airform                 # one entity's full note
 bin/kb stats                       # coverage: stubs, entry counts by source type
+bin/kb check                       # validate wikilinks resolve + filenames match name:
 ```
 
 `grep -ri "term" kb/notes/` works fine too, and often better. No

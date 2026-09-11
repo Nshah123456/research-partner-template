@@ -11,6 +11,7 @@ API keys, no network — just text on disk.
   kb search <terms...>          keyword search across all notes
   kb show <name>                one entity's full note, newest entry first
   kb stats                      coverage — entity counts, stubs, staleness
+  kb check                      validate wikilinks resolve + filenames match name:
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ NOTES = ROOT / "kb" / "notes"
 WATCH_SOFT_LIMIT = 5  # more than this and the proactive-watch routine gets shallow/noisy — see CLAUDE.md
 
 ENTRY_HEADING_RE = re.compile(r"^##\s+(\d{4}-\d{2}-\d{2})\s+\[(\w+)\]\s*(.*)$")
+WIKILINK_RE = re.compile(r"\[\[([^\]|]+)(?:\|[^\]]*)?\]\]")
 
 
 # --------------------------------------------------------------------------- #
@@ -270,6 +272,49 @@ def cmd_stats(args) -> int:
     return 0
 
 
+def cmd_check(args) -> int:
+    """Catch the two ways a note silently breaks Obsidian linking: a `name:`
+    that doesn't match its filename, and a [[wikilink]] with no matching file
+    (Obsidian resolves links by filename and will quietly create a blank stub
+    at the vault root for either case — see CLAUDE.md)."""
+    entities = load_entities()
+    if not entities:
+        print("No notes yet. Expected files in kb/notes/*.md")
+        return 1
+
+    stems_lower = {e["path"].stem.lower(): e["path"].stem for e in entities}
+    problems = 0
+
+    for e in entities:
+        name, stem = e["meta"].get("name", ""), e["path"].stem
+        if name and name != stem:
+            problems += 1
+            print(
+                f"NAME/FILENAME MISMATCH: {e['path'].relative_to(ROOT)} has "
+                f"name: \"{name}\" but the filename is \"{stem}\" — any "
+                f"[[{name}]] link elsewhere will silently fail to resolve."
+            )
+
+    broken: dict[str, list[str]] = {}
+    for e in entities:
+        label = e["meta"].get("name", e["path"].stem)
+        for m in WIKILINK_RE.finditer(e["body"]):
+            target = m.group(1).strip()
+            if target.lower() not in stems_lower:
+                broken.setdefault(target, []).append(label)
+
+    if broken:
+        problems += len(broken)
+        print("BROKEN WIKILINKS (no matching file in kb/notes/ yet):")
+        for target, sources in sorted(broken.items()):
+            print(f"  [[{target}]]  <- referenced from: {', '.join(sorted(set(sources)))}")
+
+    if problems == 0:
+        print(f"OK — {len(entities)} entities, all wikilinks resolve, all filenames match name:")
+        return 0
+    return 1
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="kb", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -290,6 +335,10 @@ def main() -> int:
     b.set_defaults(func=cmd_show)
 
     sub.add_parser("stats", help="corpus coverage").set_defaults(func=cmd_stats)
+
+    sub.add_parser(
+        "check", help="validate wikilinks resolve + filenames match name:"
+    ).set_defaults(func=cmd_check)
 
     args = p.parse_args()
     return args.func(args)
